@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import CONF_PORT, DEFAULT_PORT, DOMAIN
 from .entity import GLKVMEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -147,7 +147,12 @@ async def async_setup_entry(
 
     # Get unique ID base
     serial = config_entry.data.get("serial", config_entry.entry_id)
-    unique_id_base = f"{config_entry.entry_id}_{serial}"
+    port = config_entry.data.get(CONF_PORT, DEFAULT_PORT)
+    unique_id_base = (
+        f"{config_entry.entry_id}_{serial}_port{port}"
+        if CONF_PORT in config_entry.data
+        else f"{config_entry.entry_id}_{serial}"
+    )
 
     # Get device name
     device_name = config_entry.title or "GLKVM"

@@ -11,9 +11,12 @@ from homeassistant.helpers.translation import async_get_translations
 from .const import (
     CONF_HOST,
     CONF_PASSWORD,
+    CONF_PORT,
     DEFAULT_HOST,
     DEFAULT_PASSWORD,
+    DEFAULT_PORT,
     DOMAIN,
+    MAX_PORTS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,8 +51,14 @@ def update_existing_entry(hass: HomeAssistant | None, existing_entry, user_input
         hass.config_entries.async_update_entry(existing_entry, data=updated_data)
 
 
-def find_existing_entry(flow_handler, serial) -> config_entries.ConfigEntry | None:
-    """Find an existing entry with the same serial number."""
+def find_existing_entry(
+    flow_handler, serial, port: int | None = None
+) -> config_entries.ConfigEntry | None:
+    """Find an existing entry with the same serial (and port, if given).
+
+    For multi-port devices (Comet-x) pass `port` to match on serial+port;
+    entries for other ports of the same KVM are not duplicates.
+    """
     if not serial:
         return None
     existing_entries = flow_handler._async_current_entries()
@@ -57,9 +66,44 @@ def find_existing_entry(flow_handler, serial) -> config_entries.ConfigEntry | No
         entry_serial = entry.data.get("serial")
         _LOGGER.debug("Checking existing %s against %s", entry_serial, serial)
         if entry_serial and entry_serial.lower() == serial.lower():
-            return entry
+            if port is not None:
+                if entry.data.get(CONF_PORT, DEFAULT_PORT) == port:
+                    return entry
+            else:
+                return entry
     _LOGGER.debug("No existing entry found for %s, configuring", serial)
     return None
+
+
+def create_port_schema(available: list[int], default: int = DEFAULT_PORT):
+    """Schema for the target-port picker step."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_PORT,
+                default=str(default),
+                description={"multiple": False},
+            ): vol.In({str(p): p for p in available}),
+        }
+    )
+
+
+def port_labels(device_info: dict | None) -> dict[int, str]:
+    """Map port numbers to human labels from the device's port names."""
+    labels = {}
+    named = {}
+    if device_info:
+        for p in device_info.get("ports", []) or []:
+            try:
+                pid = str(p.get("id", ""))
+                num = int(pid.split(".")[-1]) if "." in pid else int(pid)
+            except (TypeError, ValueError):
+                continue
+            if p.get("name"):
+                named[num] = p["name"]
+    for num in range(1, MAX_PORTS + 1):
+        labels[num] = f"Port {num} ({named[num]})" if num in named else f"Port {num}"
+    return labels
 
 
 async def get_translations(hass: HomeAssistant, language, domain):

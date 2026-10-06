@@ -1,6 +1,5 @@
 """Switch platform for GL.iNet KVM power control."""
 
-import functools
 import logging
 
 from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
@@ -9,10 +8,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    API_ATX_POWER,
-    ATX_ACTION_POWER_ON,
     ATX_ACTION_POWER_OFF,
+    ATX_ACTION_POWER_OFF_HARD,
+    ATX_ACTION_POWER_ON,
+    CONF_PORT,
+    CONF_SHUTDOWN_MODE,
+    DEFAULT_PORT,
     DOMAIN,
+    SHUTDOWN_MODE_FORCE,
 )
 from .entity import GLKVMEntity
 
@@ -29,12 +32,14 @@ class GLKVMPowerSwitch(GLKVMEntity, SwitchEntity):
         coordinator,
         unique_id_base: str,
         device_name: str,
+        shutdown_mode: str = "graceful",
     ) -> None:
         """Initialize the power switch."""
         super().__init__(coordinator, unique_id_base)
         self._attr_unique_id = f"{unique_id_base}_power_switch"
         self._attr_name = f"{device_name} Power"
         self._attr_icon = "mdi:power"
+        self._shutdown_mode = shutdown_mode
 
     @property
     def available(self) -> bool:
@@ -61,47 +66,22 @@ class GLKVMPowerSwitch(GLKVMEntity, SwitchEntity):
         """Turn on the system (only if currently off)."""
         if not self.is_on:
             _LOGGER.debug("System is off, sending power on command")
-            await self._send_atx_command(ATX_ACTION_POWER_ON)
+            await self.coordinator.async_atx(action=ATX_ACTION_POWER_ON)
         else:
             _LOGGER.debug("System is already on, skipping power on command")
 
     async def async_turn_off(self, **kwargs) -> None:
-        """Turn off the system (graceful shutdown)."""
+        """Turn off the system (graceful shutdown by default)."""
         if self.is_on:
-            _LOGGER.debug("System is on, sending power off command")
-            await self._send_atx_command(ATX_ACTION_POWER_OFF)
+            action = (
+                ATX_ACTION_POWER_OFF_HARD
+                if self._shutdown_mode == SHUTDOWN_MODE_FORCE
+                else ATX_ACTION_POWER_OFF
+            )
+            _LOGGER.debug("System is on, sending %s command", action)
+            await self.coordinator.async_atx(action=action)
         else:
             _LOGGER.debug("System is already off, skipping power off command")
-
-    async def _send_atx_command(self, action: str) -> None:
-        """Send ATX power command to the device."""
-        try:
-            url = f"{self.coordinator.url}{API_ATX_POWER}"
-            _LOGGER.debug("Sending ATX command: %s to %s", action, url)
-
-            response = await self.coordinator.hass.async_add_executor_job(
-                functools.partial(
-                    self.coordinator.session.post,
-                    url,
-                    params={"action": action},
-                    auth=self.coordinator.auth,
-                    timeout=10,
-                )
-            )
-
-            if response.status_code == 200:
-                _LOGGER.info("ATX command '%s' sent successfully", action)
-                await self.coordinator.async_request_refresh()
-            else:
-                _LOGGER.error(
-                    "ATX command '%s' failed with status %s: %s",
-                    action,
-                    response.status_code,
-                    response.text,
-                )
-
-        except Exception as err:
-            _LOGGER.error("Error sending ATX command '%s': %s", action, err)
 
 
 async def async_setup_entry(
@@ -109,17 +89,23 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up GLKVM switches from a config entry."""
+    """Set up GLKVM power switch from a config entry."""
     _LOGGER.debug("Setting up GLKVM power switch from config entry")
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
 
     serial = config_entry.data.get("serial", config_entry.entry_id)
-    unique_id_base = f"{config_entry.entry_id}_{serial}"
+    port = config_entry.data.get(CONF_PORT, DEFAULT_PORT)
+    unique_id_base = (
+        f"{config_entry.entry_id}_{serial}_port{port}"
+        if CONF_PORT in config_entry.data
+        else f"{config_entry.entry_id}_{serial}"
+    )
 
     device_name = config_entry.title or "GLKVM"
+    shutdown_mode = config_entry.options.get(CONF_SHUTDOWN_MODE, "graceful")
 
     switches = [
-        GLKVMPowerSwitch(coordinator, unique_id_base, device_name),
+        GLKVMPowerSwitch(coordinator, unique_id_base, device_name, shutdown_mode),
     ]
 
     async_add_entities(switches, True)

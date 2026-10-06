@@ -1,4 +1,4 @@
-"""Global pytest fixtures for PiKVM integration tests."""
+"""Global pytest fixtures for GLKVM integration tests."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -18,11 +18,11 @@ def mock_setup_entry_calls():
     """Avoid setting up the actual integration during config flow tests."""
     with (
         patch(
-            "custom_components.pikvm_ha.async_setup_entry",
+            "custom_components.glkvm.async_setup_entry",
             new=AsyncMock(return_value=True),
         ),
         patch(
-            "custom_components.pikvm_ha.async_unload_entry",
+            "custom_components.glkvm.async_unload_entry",
             new=AsyncMock(return_value=True),
         ),
     ):
@@ -30,7 +30,7 @@ def mock_setup_entry_calls():
 
 
 @pytest.fixture
-def pikvm_cert():
+def glkvm_cert():
     """Return a synthetic PEM certificate used by the unit tests."""
     return (
         "-----BEGIN CERTIFICATE-----\n"
