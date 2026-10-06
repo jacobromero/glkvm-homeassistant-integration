@@ -8,13 +8,19 @@ from .cert_handler import fetch_serialized_cert, is_glkvm_device
 from .const import (
     CONF_CERTIFICATE,
     CONF_HOST,
+    CONF_MODEL,
     CONF_PASSWORD,
+    CONF_PORT,
+    CONF_SERIAL,
     DEFAULT_PASSWORD,
+    DEFAULT_PORT,
     DEFAULT_USERNAME,
     DOMAIN,
+    MAX_PORTS,
 )
 from .utils import (
     create_data_schema,
+    create_port_schema,
     format_url,
     get_translations,
     update_existing_entry,
@@ -38,6 +44,8 @@ class GLKVMOptionsFlowHandler(config_entries.OptionsFlow):
             self.hass, self.hass.config.language, DOMAIN
         )
         _LOGGER.debug("Entered async_step_init with data: %s", user_input)
+
+        is_port_entry = CONF_PORT in self.config_entry.data
 
         if user_input is not None:
             url = format_url(user_input[CONF_HOST])
@@ -67,21 +75,43 @@ class GLKVMOptionsFlowHandler(config_entries.OptionsFlow):
                         response.serial,
                     )
 
+                    # Match on serial (+port for port entries) rather than
+                    # unique_id, which is serial_portN for Comet-x entries.
+                    raw_port = user_input.get(CONF_PORT)
+                    port = (
+                        int(raw_port)
+                        if raw_port is not None
+                        else self.config_entry.data.get(CONF_PORT)
+                    )
                     existing_entry = None
                     for entry in self.hass.config_entries.async_entries(DOMAIN):
-                        if entry.unique_id == response.serial:
-                            existing_entry = entry
-                            break
+                        if (entry.data.get(CONF_SERIAL) or "").lower() != (
+                            response.serial or ""
+                        ).lower():
+                            continue
+                        if is_port_entry or port is not None:
+                            if entry.data.get(CONF_PORT, DEFAULT_PORT) != port:
+                                continue
+                        existing_entry = entry
+                        break
 
-                    if existing_entry:
+                    if existing_entry and existing_entry.entry_id != self.config_entry.entry_id:
                         update_existing_entry(self.hass, existing_entry, user_input)
                         return self.async_create_entry(title="", data={})
 
-                    user_input["serial"] = response.serial
                     new_data = {**self.config_entry.data, **user_input}
-                    self.hass.config_entries.async_update_entry(
-                        self.config_entry, data=new_data
-                    )
+                    if is_port_entry:
+                        new_data[CONF_PORT] = port
+                        new_unique_id = f"{response.serial}_port{port}"
+                        self.hass.config_entries.async_update_entry(
+                            self.config_entry,
+                            data=new_data,
+                            unique_id=new_unique_id,
+                        )
+                    else:
+                        self.hass.config_entries.async_update_entry(
+                            self.config_entry, data=new_data
+                        )
                     return self.async_create_entry(title="", data={})
                 else:
                     errors["base"] = "cannot_connect"
@@ -100,18 +130,40 @@ class GLKVMOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
 
+        placeholders = {
+            "url": self.translate(
+                "config.step.user.data.url", "URL or IP address of the KVM device"
+            ),
+            "password": self.translate(
+                "config.step.user.data.password", "Password for KVM"
+            ),
+        }
+
+        if is_port_entry:
+            current_port = self.config_entry.data.get(CONF_PORT, DEFAULT_PORT)
+            port_count = self.config_entry.data.get("port_count", MAX_PORTS)
+            taken = {
+                e.data.get(CONF_PORT, DEFAULT_PORT)
+                for e in self.hass.config_entries.async_entries(DOMAIN)
+                if (e.data.get(CONF_SERIAL) or "").lower()
+                == (self.config_entry.data.get(CONF_SERIAL) or "").lower()
+                and e.entry_id != self.config_entry.entry_id
+            }
+            available = [
+                p
+                for p in range(1, min(port_count, MAX_PORTS) + 1)
+                if p not in taken or p == current_port
+            ]
+            data_schema = data_schema.extend(
+                dict(create_port_schema(available, default=current_port).schema)
+            )
+            placeholders["port"] = self.translate(
+                "config.step.port.data.port", "Target port (device) to manage"
+            )
+
         return self.async_show_form(
             step_id="init",
             data_schema=data_schema,
             errors=errors,
-            description_placeholders={
-                "url": self.translate(
-                    "config.step.user.data.url", "URL or IP address of the KVM device"
-                ),
-                "password": self.translate(
-                    "config.step.user.data.password", "Password for KVM"
-                ),
-            },
+            description_placeholders=placeholders,
         )
-
-

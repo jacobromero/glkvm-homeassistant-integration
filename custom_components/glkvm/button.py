@@ -1,6 +1,5 @@
 """Button platform for GL.iNet KVM ATX controls."""
 
-import functools
 import logging
 
 from homeassistant.components.button import ButtonEntity, ButtonDeviceClass
@@ -9,9 +8,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    API_ATX_POWER,
-    ATX_ACTION_POWER_OFF,
-    ATX_ACTION_RESET,
+    ATX_BUTTON_POWER,
+    ATX_BUTTON_RESET,
+    CONF_PORT,
+    DEFAULT_PORT,
     DOMAIN,
 )
 from .entity import GLKVMEntity
@@ -28,7 +28,7 @@ class GLKVMButtonEntity(GLKVMEntity, ButtonEntity):
         unique_id_base: str,
         button_type: str,
         name: str,
-        action: str,
+        button: str,
         icon: str,
         device_class: ButtonDeviceClass | None = None,
     ) -> None:
@@ -37,43 +37,13 @@ class GLKVMButtonEntity(GLKVMEntity, ButtonEntity):
         self._attr_unique_id = f"{unique_id_base}_{button_type}"
         self._attr_name = name
         self._attr_icon = icon
-        self._action = action
+        self._button = button
         if device_class:
             self._attr_device_class = device_class
 
     async def async_press(self) -> None:
-        """Handle the button press."""
-        await self._send_atx_command(self._action)
-
-    async def _send_atx_command(self, action: str) -> None:
-        """Send ATX power command to the device."""
-        try:
-            url = f"{self.coordinator.url}{API_ATX_POWER}"
-            _LOGGER.debug("Sending ATX command: %s to %s", action, url)
-
-            response = await self.coordinator.hass.async_add_executor_job(
-                functools.partial(
-                    self.coordinator.session.post,
-                    url,
-                    params={"action": action},
-                    auth=self.coordinator.auth,
-                    timeout=10,
-                )
-            )
-
-            if response.status_code == 200:
-                _LOGGER.info("ATX command '%s' sent successfully", action)
-                await self.coordinator.async_request_refresh()
-            else:
-                _LOGGER.error(
-                    "ATX command '%s' failed with status %s: %s",
-                    action,
-                    response.status_code,
-                    response.text,
-                )
-
-        except Exception as err:
-            _LOGGER.error("Error sending ATX command '%s': %s", action, err)
+        """Handle the button press (momentary ATX click)."""
+        await self.coordinator.async_atx(button=self._button)
 
 
 class GLKVMPowerButton(GLKVMButtonEntity):
@@ -86,7 +56,7 @@ class GLKVMPowerButton(GLKVMButtonEntity):
             unique_id_base,
             "power_button",
             f"{device_name} Power Button",
-            ATX_ACTION_POWER_OFF,
+            ATX_BUTTON_POWER,
             "mdi:power",
         )
 
@@ -101,7 +71,7 @@ class GLKVMResetButton(GLKVMButtonEntity):
             unique_id_base,
             "reset_button",
             f"{device_name} Reset Button",
-            ATX_ACTION_RESET,
+            ATX_BUTTON_RESET,
             "mdi:restart",
             ButtonDeviceClass.RESTART,
         )
@@ -117,7 +87,12 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
 
     serial = config_entry.data.get("serial", config_entry.entry_id)
-    unique_id_base = f"{config_entry.entry_id}_{serial}"
+    port = config_entry.data.get(CONF_PORT, DEFAULT_PORT)
+    unique_id_base = (
+        f"{config_entry.entry_id}_{serial}_port{port}"
+        if CONF_PORT in config_entry.data
+        else f"{config_entry.entry_id}_{serial}"
+    )
 
     device_name = config_entry.title or "GLKVM"
 

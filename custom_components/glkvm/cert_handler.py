@@ -36,7 +36,7 @@ from urllib3.exceptions import InsecureRequestWarning
 
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_HOST, CONF_MODEL, CONF_SERIAL
+from .const import API_SWITCH, CONF_HOST, CONF_MODEL, CONF_SERIAL, MAX_PORTS
 
 warnings.simplefilter("ignore", InsecureRequestWarning)
 
@@ -150,13 +150,51 @@ def format_url(input_url):
 
 
 GLKVMResponse = namedtuple(
-    "GLKVMResponse", ["success", "model", "serial", "name", "error"]
+    "GLKVMResponse", ["success", "model", "serial", "name", "error", "port_count"]
 )
+GLKVMResponse.__new__.__defaults__ = (None,)  # port_count optional
+
+
+async def _probe_port_count(
+    hass: HomeAssistant | None, session, url: str, username: str, password: str
+) -> int | None:
+    """Return the number of target ports if this is a multi-port (Comet-x) KVM.
+
+    Probes GET /api/switch. Returns None for single-device units (404 or
+    no switch API). For Comet-x style units returns the number of
+    configured ports, defaulting to MAX_PORTS when channels have not
+    been registered yet (model.ports is empty until configured in the UI).
+    """
+    try:
+        if hass is not None:
+            response = await hass.async_add_executor_job(
+                functools.partial(
+                    session.get,
+                    f"{url}{API_SWITCH}",
+                    auth=HTTPBasicAuth(username, password),
+                )
+            )
+        else:
+            response = session.get(
+                f"{url}{API_SWITCH}", auth=HTTPBasicAuth(username, password)
+            )
+        if response.status_code != 200:
+            return None
+        result = response.json().get("result", {})
+        ports = result.get("model", {}).get("ports", [])
+        if ports:
+            return len(ports)
+        # Switch API exists but no channels registered yet: it's a
+        # multi-port unit (Comet-x) with its full port count available.
+        return MAX_PORTS
+    except Exception as err:  # noqa: BLE001 - probing is best-effort
+        _LOGGER.debug("Switch API probe failed (single-device?): %s", err)
+        return None
 
 
 async def is_glkvm_device(
     hass: HomeAssistant | None, url: str, username: str, password: str, cert: str
-) -> tuple:
+) -> GLKVMResponse:
     """Check if the device is a GLKVM and return its serial number.
 
     Args:
@@ -228,7 +266,11 @@ async def is_glkvm_device(
                 model = "GLKVM"
 
             _LOGGER.debug("Extracted serial number: %s, model: %s", serial, model)
-            return GLKVMResponse(True, model, serial, name, None)
+
+            port_count = await _probe_port_count(
+                hass, session, url, username, password
+            )
+            return GLKVMResponse(True, model, serial, name, None, port_count)
 
         _LOGGER.error("Device check failed: 'ok' key not present or false")
         return GLKVMResponse(False, None, None, None, "GenericException")

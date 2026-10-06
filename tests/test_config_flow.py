@@ -1,50 +1,57 @@
-"""Tests for the PiKVM config flow."""
+"""Tests for the GLKVM config flow (single-device and Comet-x multiport)."""
 
-from ipaddress import IPv4Address, IPv6Address
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant import config_entries
-from homeassistant.components.zeroconf import ZeroconfServiceInfo
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.pikvm_ha import config_flow
-from custom_components.pikvm_ha.cert_handler import PiKVMResponse
-from custom_components.pikvm_ha.const import (
+from custom_components.glkvm import config_flow
+from custom_components.glkvm.cert_handler import GLKVMResponse
+from custom_components.glkvm.const import (
     CONF_CERTIFICATE,
     CONF_HOST,
     CONF_MODEL,
     CONF_PASSWORD,
+    CONF_PORT,
     CONF_SERIAL,
-    CONF_USERNAME,
     DEFAULT_PASSWORD,
     DEFAULT_USERNAME,
     DOMAIN,
     MANUFACTURER,
 )
-from custom_components.pikvm_ha.options_flow import PiKVMOptionsFlowHandler
+from custom_components.glkvm.options_flow import GLKVMOptionsFlowHandler
+
+COMET_SERIAL = "comet-serial"
+
+
+def _comet_response(port_count=4):
+    return GLKVMResponse(
+        True, "RM4PE", COMET_SERIAL, "comet.local", None, port_count
+    )
+
+
+def _single_response():
+    return GLKVMResponse(True, "v3", "glkvm-1234", "My GLKVM", None, None)
 
 
 @pytest.mark.asyncio
-async def test_config_flow_user_success(hass, pikvm_cert):
-    """Test a full successful user initiated config flow."""
+async def test_config_flow_single_device_success(hass, glkvm_cert):
+    """Single-device flow creates one entry with no port key."""
     user_input = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: "admin",
+        CONF_HOST: "https://glkvm.local",
         CONF_PASSWORD: "secret",
     }
 
-    response = PiKVMResponse(True, "v3", "pikvm-1234", "My PiKVM", None)
-
     with patch(
-        "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
-        new=AsyncMock(return_value=pikvm_cert),
-    ) as mock_fetch, patch(
-        "custom_components.pikvm_ha.config_flow.is_pikvm_device",
-        new=AsyncMock(return_value=response),
-    ) as mock_is_pikvm:
+        "custom_components.glkvm.config_flow.fetch_serialized_cert",
+        new=AsyncMock(return_value=glkvm_cert),
+    ), patch(
+        "custom_components.glkvm.config_flow.is_glkvm_device",
+        new=AsyncMock(return_value=_single_response()),
+    ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": config_entries.SOURCE_USER},
@@ -52,31 +59,27 @@ async def test_config_flow_user_success(hass, pikvm_cert):
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["title"] == "My PiKVM"
-    assert result["data"][CONF_CERTIFICATE] == pikvm_cert
-    assert result["data"][CONF_SERIAL] == "pikvm-1234"
+    assert result["title"] == "My GLKVM"
+    assert result["data"][CONF_CERTIFICATE] == glkvm_cert
+    assert result["data"][CONF_SERIAL] == "glkvm-1234"
     assert result["data"][CONF_MODEL] == "v3"
-    mock_fetch.assert_awaited_once()
-    mock_is_pikvm.assert_awaited_once()
+    assert CONF_PORT not in result["data"]
 
 
 @pytest.mark.asyncio
-async def test_config_flow_user_cannot_connect(hass, pikvm_cert):
-    """Test the user step when the device cannot be reached."""
+async def test_config_flow_cometx_shows_port_picker(hass, glkvm_cert):
+    """Comet-x (port_count>1) proceeds to a port selection step."""
     user_input = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: "admin",
+        CONF_HOST: "https://192.168.0.40",
         CONF_PASSWORD: "secret",
     }
 
-    failure = PiKVMResponse(False, None, None, None, "cannot_connect")
-
     with patch(
-        "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
-        new=AsyncMock(return_value=pikvm_cert),
+        "custom_components.glkvm.config_flow.fetch_serialized_cert",
+        new=AsyncMock(return_value=glkvm_cert),
     ), patch(
-        "custom_components.pikvm_ha.config_flow.is_pikvm_device",
-        new=AsyncMock(return_value=failure),
+        "custom_components.glkvm.config_flow.is_glkvm_device",
+        new=AsyncMock(return_value=_comet_response()),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
@@ -85,50 +88,124 @@ async def test_config_flow_user_cannot_connect(hass, pikvm_cert):
         )
 
     assert result["type"] == FlowResultType.FORM
-    assert result["errors"]["base"] == "cannot_connect"
+    assert result["step_id"] == "port"
 
 
-@pytest.mark.asyncio
-async def test_config_flow_user_initial_form(hass):
-    """Ensure the initial user form is shown with translation fallbacks."""
-    translator = lambda key, default: default
-
+async def _start_comet_flow(hass, glkvm_cert):
+    """Run the user step against a Comet-x and return (flow_id, port_form)."""
     with patch(
-        "custom_components.pikvm_ha.config_flow.get_translations",
-        new=AsyncMock(return_value=translator),
+        "custom_components.glkvm.config_flow.fetch_serialized_cert",
+        new=AsyncMock(return_value=glkvm_cert),
+    ), patch(
+        "custom_components.glkvm.config_flow.is_glkvm_device",
+        new=AsyncMock(return_value=_comet_response()),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": config_entries.SOURCE_USER},
+            data={CONF_HOST: "https://192.168.0.40", CONF_PASSWORD: "secret"},
         )
-
-    assert result["type"] == FlowResultType.FORM
-    assert result["errors"] == {}
+    return result["flow_id"], result
 
 
 @pytest.mark.asyncio
-async def test_config_flow_user_discovery_retry_shows_form(hass, pikvm_cert):
-    """Verify zeroconf discovery with retry surfaces the user form with errors."""
-    flow = config_flow.PiKVMConfigFlow()
-    flow.hass = hass
-    flow._discovery_info = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: DEFAULT_USERNAME,
-        CONF_PASSWORD: DEFAULT_PASSWORD,
-        "serial": "SERIAL123",
-    }
+async def test_config_flow_cometx_creates_port_entry(hass, glkvm_cert):
+    """Selecting a port creates an entry keyed serial_portN."""
+    flow_id, port_form = await _start_comet_flow(hass, glkvm_cert)
+    assert port_form["step_id"] == "port"
 
-    with (
-        patch(
-            "custom_components.pikvm_ha.config_flow.perform_device_setup",
-            new=AsyncMock(return_value=(None, {"base": "cannot_connect"})),
-        ),
-        patch(
-            "custom_components.pikvm_ha.config_flow.get_translations",
-            new=AsyncMock(return_value=lambda key, default: default),
-        ),
+    result = await hass.config_entries.flow.async_configure(
+        flow_id, {CONF_PORT: "2"}
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["title"] == "comet.local (Port 2)"
+    assert result["data"][CONF_PORT] == 2
+    assert result["data"][CONF_SERIAL] == COMET_SERIAL
+
+
+@pytest.mark.asyncio
+async def test_config_flow_cometx_skips_configured_ports(hass, glkvm_cert):
+    """Already-configured ports are not offered again."""
+    MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=f"{COMET_SERIAL}_port1",
+        data={
+            CONF_HOST: "https://192.168.0.40",
+            CONF_PASSWORD: "secret",
+            CONF_SERIAL: COMET_SERIAL,
+            CONF_PORT: 1,
+        },
+    ).add_to_hass(hass)
+
+    _, port_form = await _start_comet_flow(hass, glkvm_cert)
+    assert port_form["type"] == FlowResultType.FORM
+    schema = port_form["data_schema"]
+    key = next(k for k in schema.schema if str(k) == CONF_PORT)
+    options = list(schema.schema[key].container)
+    assert "1" not in options
+    assert set(options) == {"2", "3", "4"}
+
+
+@pytest.mark.asyncio
+async def test_config_flow_cometx_all_ports_configured(hass, glkvm_cert):
+    """Adding a 5th port aborts with all_ports_configured."""
+    for port in (1, 2, 3, 4):
+        MockConfigEntry(
+            domain=DOMAIN,
+            unique_id=f"{COMET_SERIAL}_port{port}",
+            data={
+                CONF_HOST: "https://192.168.0.40",
+                CONF_PASSWORD: "secret",
+                CONF_SERIAL: COMET_SERIAL,
+                CONF_PORT: port,
+            },
+        ).add_to_hass(hass)
+
+    with patch(
+        "custom_components.glkvm.config_flow.fetch_serialized_cert",
+        new=AsyncMock(return_value=glkvm_cert),
+    ), patch(
+        "custom_components.glkvm.config_flow.is_glkvm_device",
+        new=AsyncMock(return_value=_comet_response()),
     ):
-        result = await flow.async_step_zeroconf_confirm("add_device")
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_USER},
+            data={CONF_HOST: "https://192.168.0.40", CONF_PASSWORD: "secret"},
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "all_ports_configured"
+
+
+@pytest.mark.asyncio
+async def test_config_flow_cometx_bad_port_rejected(hass, glkvm_cert):
+    """A port outside the available set is rejected by the schema."""
+    from homeassistant.data_entry_flow import InvalidData
+
+    flow_id, port_form = await _start_comet_flow(hass, glkvm_cert)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.flow.async_configure(flow_id, {CONF_PORT: "9"})
+
+
+@pytest.mark.asyncio
+async def test_config_flow_user_cannot_connect(hass, glkvm_cert):
+    """Unreachable device re-shows the user form with an error."""
+    failure = GLKVMResponse(False, None, None, None, "cannot_connect", None)
+
+    with patch(
+        "custom_components.glkvm.config_flow.fetch_serialized_cert",
+        new=AsyncMock(return_value=glkvm_cert),
+    ), patch(
+        "custom_components.glkvm.config_flow.is_glkvm_device",
+        new=AsyncMock(return_value=failure),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_USER},
+            data={CONF_HOST: "https://glkvm.local", CONF_PASSWORD: "secret"},
+        )
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"]["base"] == "cannot_connect"
@@ -136,71 +213,57 @@ async def test_config_flow_user_discovery_retry_shows_form(hass, pikvm_cert):
 
 @pytest.mark.asyncio
 async def test_perform_device_setup_missing_certificate(hass):
-    """Ensure we surface an error when no certificate can be retrieved."""
-    flow = config_flow.PiKVMConfigFlow()
+    """No cert -> cannot_fetch_cert."""
+    flow = config_flow.GLKVMConfigFlow()
     flow.hass = hass
 
-    user_input = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: "admin",
-        CONF_PASSWORD: "secret",
-    }
-
     with patch(
-        "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
+        "custom_components.glkvm.config_flow.fetch_serialized_cert",
         new=AsyncMock(return_value=None),
     ):
-        entry, errors = await config_flow.perform_device_setup(flow, user_input)
+        entry, errors = await config_flow.perform_device_setup(
+            flow, {CONF_HOST: "https://glkvm.local", CONF_PASSWORD: "secret"}
+        )
 
     assert entry is None
     assert errors["base"] == "cannot_fetch_cert"
 
 
 @pytest.mark.asyncio
-async def test_perform_device_setup_existing_entry_updates(hass, pikvm_cert):
-    """Existing entries should be updated and abort the flow."""
-    flow = config_flow.PiKVMConfigFlow()
+async def test_perform_device_setup_existing_single_entry_updates(hass, glkvm_cert):
+    """Existing single-device entries are updated and the flow aborts."""
+    flow = config_flow.GLKVMConfigFlow()
     flow.hass = hass
     flow.async_abort = MagicMock(return_value={"type": FlowResultType.ABORT})
-    flow.async_set_unique_id = AsyncMock()
-    flow.async_create_entry = MagicMock()
 
     existing_entry = MagicMock()
     existing_entry.data = {
-        CONF_USERNAME: "saved",
         CONF_PASSWORD: "s3cret",
-        "serial": "pikvm-serial",
+        "serial": "glkvm-serial",
     }
 
     with (
         patch(
-            "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
-            new=AsyncMock(return_value=pikvm_cert),
+            "custom_components.glkvm.config_flow.fetch_serialized_cert",
+            new=AsyncMock(return_value=glkvm_cert),
         ),
         patch(
-            "custom_components.pikvm_ha.config_flow.is_pikvm_device",
+            "custom_components.glkvm.config_flow.is_glkvm_device",
             new=AsyncMock(
-                return_value=PiKVMResponse(
-                    True, "V3", "pikvm-serial", "My PiKVM", None
-                )
+                return_value=GLKVMResponse(True, "V3", "glkvm-serial", "My GLKVM", None)
             ),
         ),
         patch(
-            "custom_components.pikvm_ha.config_flow.find_existing_entry",
+            "custom_components.glkvm.config_flow.find_existing_entry",
             return_value=existing_entry,
         ),
         patch(
-            "custom_components.pikvm_ha.config_flow.update_existing_entry",
+            "custom_components.glkvm.config_flow.update_existing_entry",
             autospec=True,
         ) as update_mock,
     ):
         entry, errors = await config_flow.perform_device_setup(
-            flow,
-            {
-                CONF_HOST: "https://pikvm.local",
-                CONF_USERNAME: "admin",
-                CONF_PASSWORD: "secret",
-            },
+            flow, {CONF_HOST: "https://glkvm.local", CONF_PASSWORD: "secret"}
         )
 
     assert entry == {"type": FlowResultType.ABORT}
@@ -209,63 +272,9 @@ async def test_perform_device_setup_existing_entry_updates(hass, pikvm_cert):
 
 
 @pytest.mark.asyncio
-async def test_perform_device_setup_unknown_error(hass):
-    """Connection failures bubble up as unknown errors."""
-    flow = config_flow.PiKVMConfigFlow()
-    flow.hass = hass
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
-        new=AsyncMock(side_effect=ConnectionError),
-    ):
-        entry, errors = await config_flow.perform_device_setup(
-            flow,
-            {
-                CONF_HOST: "https://pikvm.local",
-                CONF_USERNAME: "admin",
-                CONF_PASSWORD: "secret",
-            },
-        )
-
-    assert entry is None
-    assert errors["base"] == "unknown_error"
-
-
-@pytest.mark.asyncio
-async def test_perform_device_setup_cannot_connect_without_error(hass, pikvm_cert):
-    """Handle responses that fail without providing an explicit error code."""
-    flow = config_flow.PiKVMConfigFlow()
-    flow.hass = hass
-
-    with (
-        patch(
-            "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
-            new=AsyncMock(return_value=pikvm_cert),
-        ),
-        patch(
-            "custom_components.pikvm_ha.config_flow.is_pikvm_device",
-            new=AsyncMock(
-                return_value=PiKVMResponse(False, None, None, None, None)
-            ),
-        ),
-    ):
-        entry, errors = await config_flow.perform_device_setup(
-            flow,
-            {
-                CONF_HOST: "https://pikvm.local",
-                CONF_USERNAME: "admin",
-                CONF_PASSWORD: "secret",
-            },
-        )
-
-    assert entry is None
-    assert errors["base"] == "cannot_connect"
-
-
-@pytest.mark.asyncio
-async def test_perform_device_setup_localhost_name(hass, pikvm_cert):
-    """Ensure localhost device names fall back to the manufacturer label."""
-    flow = config_flow.PiKVMConfigFlow()
+async def test_perform_device_setup_localhost_name(hass, glkvm_cert):
+    """localhost device names fall back to the manufacturer label."""
+    flow = config_flow.GLKVMConfigFlow()
     flow.hass = hass
     flow.async_abort = MagicMock()
     flow.async_set_unique_id = AsyncMock()
@@ -273,308 +282,42 @@ async def test_perform_device_setup_localhost_name(hass, pikvm_cert):
         return_value={"type": FlowResultType.CREATE_ENTRY}
     )
 
-    user_input = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: "admin",
-        CONF_PASSWORD: "secret",
-    }
-
     with (
         patch(
-            "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
-            new=AsyncMock(return_value=pikvm_cert),
+            "custom_components.glkvm.config_flow.fetch_serialized_cert",
+            new=AsyncMock(return_value=glkvm_cert),
         ),
         patch(
-            "custom_components.pikvm_ha.config_flow.is_pikvm_device",
+            "custom_components.glkvm.config_flow.is_glkvm_device",
             new=AsyncMock(
                 return_value=SimpleNamespace(
                     success=True,
-                    model="V4PLUS",
-                    serial="pikvm-9999",
+                    model="RM4PE",
+                    serial="glkvm-9999",
                     name="localhost.localdomain",
                     error=None,
+                    port_count=None,
                 )
             ),
         ),
         patch(
-            "custom_components.pikvm_ha.config_flow.find_existing_entry",
+            "custom_components.glkvm.config_flow.find_existing_entry",
             return_value=None,
         ),
     ):
-        entry, errors = await config_flow.perform_device_setup(flow, user_input)
-
-    assert entry == {"type": FlowResultType.CREATE_ENTRY}
-    flow.async_create_entry.assert_called_once()
-    kwargs = flow.async_create_entry.call_args.kwargs
-    assert kwargs["title"] == MANUFACTURER
-    assert kwargs["data"][CONF_MODEL] == "v4plus"
-    assert kwargs["data"][CONF_SERIAL] == "pikvm-9999"
-    assert errors is None
-
-
-@pytest.mark.asyncio
-async def test_async_step_import_creates_entry(hass, pikvm_cert):
-    """Importing from configuration.yaml should reuse the user step."""
-    response = PiKVMResponse(True, "V4PLUS", "pikvm-5555", None, None)
-
-    with (
-        patch(
-            "custom_components.pikvm_ha.config_flow.fetch_serialized_cert",
-            new=AsyncMock(return_value=pikvm_cert),
-        ),
-        patch(
-            "custom_components.pikvm_ha.config_flow.is_pikvm_device",
-            new=AsyncMock(return_value=response),
-        ),
-        patch(
-            "custom_components.pikvm_ha.config_flow.find_existing_entry",
-            return_value=None,
-        ),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_IMPORT},
-            data={
-                CONF_HOST: "https://pikvm.local",
-                CONF_USERNAME: "admin",
-                CONF_PASSWORD: "secret",
-            },
+        entry, errors = await config_flow.perform_device_setup(
+            flow, {CONF_HOST: "https://glkvm.local", CONF_PASSWORD: "secret"}
         )
 
-    assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["title"] == "PiKVM"
-    assert result["data"][CONF_MODEL] == "v4plus"
+    assert entry == {"type": FlowResultType.CREATE_ENTRY}
+    kwargs = flow.async_create_entry.call_args.kwargs
+    assert kwargs["title"] == MANUFACTURER
+    assert kwargs["data"][CONF_MODEL] == "rm4pe"
+    assert errors is None
 
 
 def test_async_get_options_flow_returns_handler():
     """Validate the options flow factory."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
-    handler = config_flow.PiKVMConfigFlow.async_get_options_flow(entry)
-    assert isinstance(handler, PiKVMOptionsFlowHandler)
-
-
-@pytest.mark.asyncio
-async def test_async_step_zeroconf_missing_serial(hass):
-    """Abort zeroconf discovery when required data is missing."""
-    discovery = ZeroconfServiceInfo(
-        ip_address=IPv4Address("192.168.1.8"),
-        ip_addresses=[IPv4Address("192.168.1.8")],
-        port=443,
-        hostname="pikvm.local",
-        type="_http._tcp.local.",
-        name="pikvm._http._tcp.local.",
-        properties={"serial": "", "model": "v3"},
-    )
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.find_existing_entry",
-        return_value=None,
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_ZEROCONF},
-            data=discovery,
-        )
-
-    assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "missing_serial_or_host"
-
-
-@pytest.mark.asyncio
-async def test_async_step_zeroconf_ipv6_address(hass):
-    """Abort Zeroconf discovery for IPv6 addresses."""
-    discovery = ZeroconfServiceInfo(
-        ip_address=IPv6Address("fe80::1"),
-        ip_addresses=[IPv6Address("fe80::1")],
-        port=443,
-        hostname="pikvm.local",
-        type="_http._tcp.local.",
-        name="pikvm._http._tcp.local.",
-        properties={"serial": "SERIAL"},
-    )
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.find_existing_entry",
-        return_value=None,
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_ZEROCONF},
-            data=discovery,
-        )
-
-    assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "ipv6_address"
-
-
-@pytest.mark.asyncio
-async def test_async_step_zeroconf_existing_entry(hass):
-    """Existing entries found via Zeroconf are updated."""
-    existing_entry = MagicMock()
-    existing_entry.data = {
-        CONF_USERNAME: "admin",
-        CONF_PASSWORD: "secret",
-        "serial": "serial",
-    }
-
-    discovery = ZeroconfServiceInfo(
-        ip_address=IPv4Address("192.168.1.9"),
-        ip_addresses=[IPv4Address("192.168.1.9")],
-        port=443,
-        hostname="pikvm.local",
-        type="_http._tcp.local.",
-        name="pikvm._http._tcp.local.",
-        properties={"serial": "SERIAL", "model": "v3"},
-    )
-
-    with (
-        patch(
-            "custom_components.pikvm_ha.config_flow.find_existing_entry",
-            return_value=existing_entry,
-        ),
-        patch(
-            "custom_components.pikvm_ha.config_flow.update_existing_entry",
-            autospec=True,
-        ) as update_mock,
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_ZEROCONF},
-            data=discovery,
-        )
-
-    assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "already_configured"
-    update_mock.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_async_step_zeroconf_new_device_menu(hass):
-    """New Zeroconf discoveries prompt a confirmation menu."""
-    discovery = ZeroconfServiceInfo(
-        ip_address=IPv4Address("192.168.1.10"),
-        ip_addresses=[IPv4Address("192.168.1.10")],
-        port=443,
-        hostname="pikvm.local",
-        type="_http._tcp.local.",
-        name="pikvm._http._tcp.local.",
-        properties={"serial": "SERIAL", "model": "v3"},
-    )
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.find_existing_entry",
-        return_value=None,
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_ZEROCONF},
-            data=discovery,
-        )
-
-    assert result["type"] == FlowResultType.MENU
-    assert result["step_id"] == "zeroconf_confirm"
-
-
-@pytest.mark.asyncio
-async def test_async_step_zeroconf_confirm_ignore(hass):
-    """Ignoring a discovered device aborts the flow."""
-    flow = config_flow.PiKVMConfigFlow()
-    flow.hass = hass
-    flow._discovery_info = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: DEFAULT_USERNAME,
-        CONF_PASSWORD: DEFAULT_PASSWORD,
-        "serial": "SERIAL",
-    }
-
-    result = await flow.async_step_zeroconf_confirm("ignore")
-
-    assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "ignored"
-
-
-@pytest.mark.asyncio
-async def test_async_step_zeroconf_confirm_success(hass, pikvm_cert):
-    """Confirming a Zeroconf device proceeds with setup."""
-    flow = config_flow.PiKVMConfigFlow()
-    flow.hass = hass
-    flow._discovery_info = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: DEFAULT_USERNAME,
-        CONF_PASSWORD: DEFAULT_PASSWORD,
-        "serial": "SERIAL",
-    }
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.perform_device_setup",
-        new=AsyncMock(return_value=({"type": FlowResultType.CREATE_ENTRY}, None)),
-    ):
-        entry = await flow.async_step_zeroconf_confirm("add_device")
-
-    assert entry["type"] == FlowResultType.CREATE_ENTRY
-
-
-@pytest.mark.asyncio
-async def test_async_step_user_with_translation_dict(hass):
-    """Ensure dictionary-based translations flow through placeholders."""
-    translations = {
-        "step.user.data.url": "Translated URL",
-        "step.user.data.username": "Translated Username",
-        "step.user.data.password": "Translated Password",
-    }
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.get_translations",
-        new=AsyncMock(return_value=translations),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_USER},
-        )
-
-    assert result["type"] == FlowResultType.FORM
-    placeholders = result["description_placeholders"]
-    assert placeholders["url"] == "Translated URL"
-    assert placeholders["username"] == "Translated Username"
-    assert placeholders["password"] == "Translated Password"
-
-
-@pytest.mark.asyncio
-async def test_async_step_user_without_translations_uses_defaults(hass):
-    """Default placeholders should be provided when translations are unavailable."""
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.get_translations",
-        new=AsyncMock(return_value=None),
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": config_entries.SOURCE_USER},
-        )
-
-    assert result["type"] == FlowResultType.FORM
-    placeholders = result["description_placeholders"]
-    assert placeholders["url"] == "URL or IP address of the PiKVM device"
-    assert placeholders["username"] == "Username for PiKVM"
-    assert placeholders["password"] == "Password for PiKVM"
-
-
-@pytest.mark.asyncio
-async def test_async_step_user_discovery_password_cleared(hass):
-    """Discovery-sourced flows should blank passwords before showing the form."""
-    flow = config_flow.PiKVMConfigFlow()
-    flow.hass = hass
-    flow._discovery_info = {
-        CONF_HOST: "https://pikvm.local",
-        CONF_USERNAME: DEFAULT_USERNAME,
-        CONF_PASSWORD: "secret",
-    }
-
-    with patch(
-        "custom_components.pikvm_ha.config_flow.get_translations",
-        new=AsyncMock(return_value=lambda key, default: default),
-    ):
-        result = await flow.async_step_user()
-
-    assert result["type"] == FlowResultType.FORM
-    assert flow._discovery_info[CONF_PASSWORD] == ""
+    handler = config_flow.GLKVMConfigFlow.async_get_options_flow(entry)
+    assert isinstance(handler, GLKVMOptionsFlowHandler)

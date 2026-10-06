@@ -45,6 +45,35 @@ This is a custom integration for Home Assistant to monitor and control GL.iNet K
 - **Username**: The username to authenticate with your GLKVM device (default: `admin`).
 - **Password**: The password to authenticate with your GLKVM device.
 
+### Comet-x (GL-RM4PE) multi-device support
+
+The Comet-x quad-port KVM manages up to 4 target devices. The integration
+creates **one config entry per target port**: when a multi-port device is
+detected (via `GET /api/switch`), a "Select target device" step lists the
+available ports (1–4). Add the integration once per port you want to
+control; each port appears as its own device in Home Assistant
+(`<name> (Port N)`) with its own power sensor, power switch, and
+power/reset buttons.
+
+Notes:
+
+- Power control for a port goes through the port-scoped
+  `POST /api/switch/atx/power?port=N` / `.../click?port=N` routes, so
+  `set_active` routing is not required for ATX actions.
+- Power state is read from the per-unit ATX arrays in `GET /api/switch`
+  when channels are registered on the KVM. Until then, the integration
+  falls back to the single-device `GET /api/atx` state and only reports
+  it for the entry whose port is currently active — other ports show
+  unavailable rather than another machine's state.
+- ATX operations are momentary (simulated button press): state settles a
+  few seconds after a command, and a second command issued too quickly
+  returns `409 AtxIsBusyError`, which the integration retries with
+  backoff automatically.
+- The GL-ATXPC add-on board must be wired to each target's front-panel
+  headers for power control to have any effect.
+- You can change an entry's target port from the integration's Configure
+  (options) dialog.
+
 ## Usage
 
 Once the GLKVM integration is added and configured, you will have sensors and controls available in Home Assistant:

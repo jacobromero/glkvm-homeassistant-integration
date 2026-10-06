@@ -22,7 +22,9 @@ class GLKVMEntity(CoordinatorEntity):
         """Initialize the entity."""
         super().__init__(coordinator)
         self.coordinator = coordinator
-        self._attr_device_info = self.DEVICE_INFO
+        # Prefer the per-coordinator DeviceInfo so multiple config entries
+        # (e.g. one per Comet-x port) don't clobber each other.
+        self._attr_device_info = getattr(
+            coordinator, "device_info", None
+        ) or self.DEVICE_INFO
         self._attr_unique_id_base = unique_id_base
-
-
